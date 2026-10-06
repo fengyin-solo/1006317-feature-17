@@ -1,6 +1,19 @@
 import { MODULE_BY_KEY } from '@/data/modules'
-import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
-import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
+import {
+  allRows,
+  listCareLogs,
+  listCarePlans,
+  listRows,
+  resetRows,
+  saveRows,
+} from '@/data/local-store'
+import {
+  completeDeviceCare,
+  ensureMigrated,
+  maintenanceAction,
+  resetMaintenanceData,
+} from '@/api/maintenance-service'
+import type { ActionResult, CareLog, CarePlan, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
 const NEGATIVE_ACTIONS = ['撤销', '作废', '拒绝', '驳回', '停用', '忽略', '下线', '回滚']
@@ -24,11 +37,20 @@ export function filterRows(rows: EntryRow[], filters: Record<string, string>): E
 }
 
 export function listEntries(key: string, filters: Record<string, string> = {}): PageResult {
+  ensureMigrated()
   const matched = filterRows(listRows(key), filters)
   return { items: matched, total: matched.length, page: 1, size: matched.length }
 }
 
 export function runAction(key: string, id: number, action: string): ActionResult {
+  ensureMigrated()
+  // 检修与设备保养走各自的分段状态机：严格校验环节、完工联动保养台账。
+  if (key === 'maintenance') {
+    return maintenanceAction(id, action)
+  }
+  if (key === 'device' && action === '完成保养') {
+    return completeDeviceCare(id)
+  }
   const meta = moduleMeta(key)
   const target = meta.actionTargets[action]
   if (!target) {
@@ -57,6 +79,11 @@ export function runAction(key: string, id: number, action: string): ActionResult
 }
 
 export function resetModule(key: string): PageResult {
+  if (key === 'maintenance' || key === 'device') {
+    // 检修与设备是一套账：重置时连同派生出的保养记录、保养计划整套回到示例再回填。
+    resetMaintenanceData()
+    return listEntries(key)
+  }
   resetRows(key)
   return listEntries(key)
 }
@@ -84,10 +111,26 @@ export function downloadEntries(key: string): void {
   URL.revokeObjectURL(url)
 }
 
+export function storageHint(): string {
+  return '数据保存在本机浏览器里，换浏览器或清缓存会回到示例数据'
+}
+
+// 设备台账页读取保养台账（维保记录 / 保养计划）。
+export function careLogs(): CareLog[] {
+  ensureMigrated()
+  return listCareLogs()
+}
+
+export function carePlans(): CarePlan[] {
+  ensureMigrated()
+  return listCarePlans()
+}
+
 export function loadOverview(): OverviewResult {
+  ensureMigrated()
   const rows = allRows()
   const modules = [...MODULE_BY_KEY.values()].map((meta) => {
-    const entries = rows[meta.key] ?? []
+    const entries = (rows[meta.key] as EntryRow[] | undefined) ?? []
     return {
       name: meta.name,
       created: entries.length,
