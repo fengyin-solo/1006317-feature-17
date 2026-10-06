@@ -2,136 +2,199 @@
   <section class="page" data-module="maintenance">
     <header class="page-head">
       <div>
-        <h2>设施检修管理管理</h2>
-        <p class="page-desc">维护检修记录，围绕检修编号、检修对象、检修类别、检修班组做登记、筛选与状态流转。</p>
+        <h2>设施检修管理</h2>
+        <p class="page-desc">按检修班组和检修状态排布的月度进度视图：当月到期、拖过计划工期、延期批复未动工一屏看清；点卡片可回到检修明细。</p>
       </div>
       <div class="page-actions">
-        <button class="btn primary" type="button" @click="openCreate">登记检修记录</button>
-        <button class="btn" type="button" @click="exportRows">导出设施检修管理清单</button>
+        <button class="btn" type="button" @click="exportRows">导出检修清单</button>
       </div>
     </header>
 
+    <div class="tab-row">
+      <button
+        v-for="tab in tabs"
+        :key="tab.key"
+        class="tab-btn"
+        :class="{ active: viewMode === tab.key }"
+        type="button"
+        @click="viewMode = tab.key"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
     <div class="stat-row">
-      <article v-for="item in stats" :key="item.label" class="stat-card">
+      <article v-for="item in board.stats" :key="item.label" class="stat-card">
         <span class="stat-label">{{ item.label }}</span>
-        <strong class="stat-value">{{ item.value }}</strong>
+        <strong class="stat-value" :class="{ alert: isAlert(item.label) }">{{ item.value }}</strong>
       </article>
     </div>
 
-    <p class="status-legend">
-      <span v-for="item in statusSummary" :key="item.status" class="legend-item">
-        {{ item.status }}：{{ item.count }}
-      </span>
-    </p>
-
-    <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+    <form class="filter-bar" @submit.prevent>
+      <label class="filter-item">
+        <span>进度月份</span>
+        <input v-model="month" type="month" />
       </label>
-      <button class="btn" type="submit">查询</button>
-      <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
+      <button class="btn" type="button" @click="month = todayMonth">回到本月</button>
+      <label class="filter-item grow">
+        <span>关键字</span>
+        <input v-model="keyword" placeholder="按检修编号 / 对象 / 班组 / 关联设备检索" />
+      </label>
     </form>
 
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th v-for="column in columns" :key="column">{{ column }}</th>
-          <th>当前状态</th>
-          <th>可执行动作</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
-          <td>{{ row.status }}</td>
-          <td class="row-actions">
-            <button
-              v-for="action in actions"
-              :key="action"
-              class="link"
-              type="button"
-              @click="runAction(action, row)"
-            >
-              {{ action }}
-            </button>
-          </td>
-        </tr>
-        <tr v-if="!rows.length">
-          <td :colspan="columns.length + 2" class="empty-state">暂无设施检修管理数据，可先登记检修记录</td>
-        </tr>
-      </tbody>
-    </table>
+    <!-- 进度看板：每列一种检修状态，每行一个班组 -->
+    <div v-if="viewMode === 'board'" class="board-wrap">
+      <table class="board-table">
+        <thead>
+          <tr>
+            <th class="crew-col">检修班组</th>
+            <th v-for="status in statuses" :key="status">
+              <span class="col-head" :class="statusClass(status)">{{ status }}</span>
+              <span class="col-count">{{ board.statusTotals[status] ?? 0 }} 条</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="crew in board.crews" :key="crew">
+            <td class="crew-col">{{ crew }}</td>
+            <td v-for="status in statuses" :key="status" class="board-cell">
+              <button
+                v-for="row in board.cells[crew][status]"
+                :key="String(row.id)"
+                class="maint-card"
+                :class="statusClass(status)"
+                type="button"
+                @click="openRow(row)"
+              >
+                <span class="card-no">{{ row.检修编号 }}</span>
+                <span class="card-target">{{ row.检修对象 }}</span>
+                <span class="card-meta">
+                  计划到期：{{ row.计划结束 || '—' }}
+                </span>
+                <span v-if="row.完工日期" class="card-meta">完工：{{ row.完工日期 }}</span>
+                <span v-if="hasTags(row)" class="card-tags">
+                  <em v-for="tag in tagsOf(row)" :key="tag">{{ tag }}</em>
+                </span>
+              </button>
+              <span v-if="!board.cells[crew][status].length" class="cell-empty">—</span>
+            </td>
+          </tr>
+          <tr v-if="!board.crews.length">
+            <td :colspan="statuses.length + 1" class="empty-state">该月没有到期的检修记录</td>
+          </tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td class="crew-col">合计</td>
+            <td v-for="status in statuses" :key="status" class="foot-count">
+              {{ board.statusTotals[status] ?? 0 }} 条
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <!-- 明细视图：与看板同一份月份切片，条数对得上 -->
+    <template v-else>
+      <p class="status-legend">
+        <span v-for="status in statuses" :key="status" class="legend-item">
+          {{ status }}：{{ board.statusTotals[status] ?? 0 }}
+        </span>
+      </p>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th v-for="column in columns" :key="column">{{ column }}</th>
+            <th>当前状态</th>
+            <th>进度标记</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in board.rows" :key="String(row.id)">
+            <td v-for="column in columns" :key="column">{{ row[column] !== '' && row[column] !== undefined ? row[column] : '—' }}</td>
+            <td><span class="status-chip" :class="statusClass(String(row.status))">{{ row.status }}</span></td>
+            <td>
+              <em v-for="tag in tagsOf(row)" :key="tag" class="mini-tag">{{ tag }}</em>
+              <span v-if="!hasTags(row)">—</span>
+            </td>
+            <td class="row-actions">
+              <button class="link" type="button" @click="openRow(row)">检修明细</button>
+            </td>
+          </tr>
+          <tr v-if="!board.rows.length">
+            <td :colspan="columns.length + 3" class="empty-state">该月没有到期的检修记录</td>
+          </tr>
+        </tbody>
+      </table>
+    </template>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条设施检修管理记录</span>
-      <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
+      <span>
+        {{ month }} 视图共 {{ board.total }} 条，与明细列表条数一致
+        <template v-if="keyword">（已按「{{ keyword }}」过滤）</template>
+      </span>
     </footer>
+
+    <MaintenanceDetailDrawer :row="activeRow" @close="activeRow = null" @changed="reload" />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 
-import {
-  downloadEntries,
-  listEntries,
-  moduleMeta,
-  runAction as applyAction,
-} from '@/api/local-service'
+import { downloadEntries } from '@/api/local-service'
+import { buildBoard, getMaintenance, maintenanceTags } from '@/api/maintenance-service'
+import { currentMonth } from '@/data/maintenance-model'
 import type { EntryRow } from '@/data/types'
+import MaintenanceDetailDrawer from './MaintenanceDetailDrawer.vue'
 
-const meta = moduleMeta('maintenance')
-const columns = ["检修编号", "检修对象", "检修类别", "检修班组", "计划工期", "完工日期", "更换部件", "检修状态"]
-const actions = ["提交开工", "确认完工", "申请延期"]
-const statuses = ["待开工", "检修中", "已完工", "已延期"]
-const stats = [{"label": "待开工检修", "value": 0}, {"label": "检修中记录", "value": 0}, {"label": "本月完工数", "value": 0}]
+const statuses = ['待开工', '检修中', '已延期', '已完工']
+const columns = ['检修编号', '检修对象', '关联设备', '检修类别', '检修班组', '计划开始', '计划结束', '完工日期', '更换部件', '材料批次号']
+const tabs = [
+  { key: 'board', label: '进度看板' },
+  { key: 'list', label: '检修明细' },
+] as const
 
-const rows = ref<EntryRow[]>([])
-const total = ref(0)
-const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
-const statusSummary = computed(() =>
-  statuses.map((status: string) => ({
-    status,
-    count: rows.value.filter((row) => String(row.status) === status).length,
-  })),
-)
+const todayMonth = currentMonth()
+const month = ref(todayMonth)
+const keyword = ref('')
+const viewMode = ref<(typeof tabs)[number]['key']>('board')
+const activeId = ref<number | null>(null)
+// localStorage 不是响应式源，动作落库后自增版本号，驱动看板/明细重算。
+const dataVersion = ref(0)
 
-function resetFilters() {
-  filters.value = {}
-  reload()
+const board = computed(() => {
+  void dataVersion.value
+  return buildBoard(month.value, keyword.value)
+})
+const activeRow = computed<EntryRow | null>(() => {
+  void dataVersion.value
+  return activeId.value === null ? null : getMaintenance(activeId.value) ?? null
+})
+
+function statusClass(status: string): string {
+  return { 待开工: 'todo', 检修中: 'doing', 已延期: 'delayed', 已完工: 'done' }[status] ?? ''
+}
+function tagsOf(row: EntryRow): string[] {
+  return maintenanceTags(row)
+}
+function hasTags(row: EntryRow): boolean {
+  return maintenanceTags(row).length > 0
+}
+function isAlert(label: string): boolean {
+  return label.includes('拖过') || label.includes('延期')
 }
 
-function exportRows() {
-  downloadEntries(meta.key)
-}
-
-function openCreate() {
-  errorMessage.value = '检修记录登记入口尚未接入审批流'
-}
-
-function runAction(action: string, row: EntryRow) {
-  errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
-  if (!result.ok) {
-    errorMessage.value = result.message
-    return
-  }
-  reload()
+function openRow(row: EntryRow) {
+  activeId.value = Number(row.id)
 }
 
 function reload() {
-  errorMessage.value = ''
-  try {
-    const payload = listEntries(meta.key, filters.value)
-    rows.value = payload.items
-    total.value = payload.total
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '设施检修管理列表读取失败'
-  }
+  dataVersion.value += 1
 }
 
-onMounted(reload)
+function exportRows() {
+  downloadEntries('maintenance')
+}
 </script>
